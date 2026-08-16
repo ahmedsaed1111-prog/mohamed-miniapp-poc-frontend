@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mini App POC - initData validation test (isolated, non-production)</title>
+<title>Mini App POC - Stage 2 controlled session test</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   body { font-family: -apple-system, sans-serif; background:#111318; color:#e6e6e6; padding:24px; max-width:480px; margin:0 auto; }
   h2 { font-size:18px; margin-bottom:4px; }
   .note { font-size:13px; color:#999; margin-bottom:20px; }
   button { width:100%; padding:14px; font-size:16px; border:none; border-radius:10px; background:#2ea6ff; color:#fff; margin-top:8px; }
-  button:active { opacity:0.8; }
+  button:disabled { background:#444; color:#888; }
   .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
@@ -19,146 +19,100 @@
 </style>
 </head>
 <body>
-  <h2>Mini App POC</h2>
-  <p class="note">Isolated test page. No secrets here. Raw initData is never shown, logged, or stored on this page.</p>
-  <button id="checkBtn">Run all tests (isolated + production)</button>
+  <h2>Stage 2 - Controlled Session Test</h2>
+  <p class="note">Single-use test. No tokens are stored in localStorage/sessionStorage, ever printed to console, or put in a URL. This button disables itself after one submission.</p>
+  <button id="testBtn">Run ONE session-creation test</button>
 
-  <div class="label">Isolated POC validator - Original</div>
-  <div id="resultOriginal" class="box">No result yet.</div>
+  <div class="label">Bridge result (non-secret fields only)</div>
+  <div id="resultBridge" class="box">No result yet.</div>
 
-  <div class="label">Isolated POC validator - Approval check</div>
-  <div id="resultApproval" class="box">No result yet.</div>
-
-  <div class="label">Isolated POC validator - Tampered copy</div>
-  <div id="resultTampered" class="box">No result yet.</div>
-
-  <div class="label">PRODUCTION poc-telegram-auth-bridge - result</div>
-  <div id="resultProdBridge" class="box">No result yet.</div>
-
-  <div class="label">Overall (authenticity + tamper rejection only)</div>
-  <div id="resultOverall" class="box">No result yet.</div>
+  <div class="label">RPC test (editor_dashboard_clients via the new session)</div>
+  <div id="resultRpc" class="box">Not run yet.</div>
 
 <script>
   // Isolated POC test page only. Do not treat as production code.
-  var VALIDATOR_URL = "https://weyzoascdrpktwceldwa.supabase.co/functions/v1/validate-init-data";
   var PROD_BRIDGE_URL = "https://cifxmovqgxaafzrturrz.supabase.co/functions/v1/poc-telegram-auth-bridge";
+  var SUPABASE_URL = "https://cifxmovqgxaafzrturrz.supabase.co";
+  // Publishable key is not secret - it is the normal browser-facing key,
+  // equivalent to the existing anon key already used by the real dashboard.
+  var SUPABASE_PUBLISHABLE_KEY = "sb_publishable_4tUk_rnpMfdKdb2WJFaPng_WEwOv07c";
 
-  var elOriginal = document.getElementById("resultOriginal");
-  var elApproval = document.getElementById("resultApproval");
-  var elTampered = document.getElementById("resultTampered");
-  var elProdBridge = document.getElementById("resultProdBridge");
-  var elOverall = document.getElementById("resultOverall");
-  var btn = document.getElementById("checkBtn");
+  var elBridge = document.getElementById("resultBridge");
+  var elRpc = document.getElementById("resultRpc");
+  var btn = document.getElementById("testBtn");
 
   function setBox(el, text, cls) {
     el.textContent = text;
     el.className = "box " + (cls || "");
   }
 
-  async function callEndpoint(url, initDataString) {
-    // initDataString is passed in-memory only. It is never logged,
-    // never stored, and never rendered to the page.
-    var res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: initDataString })
-    });
-    return res.json();
-  }
-
-  // Builds a tampered COPY by changing exactly one character in a single
-  // non-hash field (auth_date), while leaving the original hash untouched.
-  // The original initData string passed in is never modified.
-  function buildTamperedCopy(originalInitData) {
-    var params = new URLSearchParams(originalInitData);
-    if (!params.has("hash")) return null;
-
-    var candidateKeys = ["auth_date", "query_id"];
-    var targetKey = null;
-    for (var i = 0; i < candidateKeys.length; i++) {
-      var v = params.get(candidateKeys[i]);
-      if (v && v.length > 0) { targetKey = candidateKeys[i]; break; }
-    }
-    if (!targetKey) return null;
-
-    var original = params.get(targetKey);
-    var lastChar = original.charAt(original.length - 1);
-    var newChar = lastChar === "0" ? "1" : "0";
-    var tamperedValue = original.slice(0, -1) + newChar;
-
-    params.set(targetKey, tamperedValue); // hash param is left as-is on purpose
-    return params.toString();
-  }
+  // In-memory only. Never assigned to localStorage/sessionStorage. Never
+  // logged. Discarded when the page is closed or reloaded.
+  var memorySession = null;
 
   btn.addEventListener("click", async function () {
-    setBox(elOriginal, "Running...");
-    setBox(elApproval, "Running...");
-    setBox(elTampered, "Running...");
-    setBox(elProdBridge, "Running...");
-    setBox(elOverall, "Running...");
+    if (btn.disabled) return;
+    btn.disabled = true; // prevent any accidental double-click / double-submit
+    btn.textContent = "Test already run (disabled)";
+
+    setBox(elBridge, "Running...");
+    setBox(elRpc, "Not run yet.");
 
     var tg = window.Telegram && window.Telegram.WebApp;
     if (!tg) {
-      setBox(elOverall, "Telegram.WebApp is not available. Not opened inside Telegram.", "invalid");
-      setBox(elOriginal, "-");
-      setBox(elApproval, "-");
-      setBox(elTampered, "-");
-      setBox(elProdBridge, "-");
+      setBox(elBridge, "Not opened inside Telegram.", "invalid");
       return;
     }
     tg.ready();
     var initData = tg.initData || "";
     if (!initData) {
-      setBox(elOverall, "No initData present.", "invalid");
-      setBox(elOriginal, "-");
-      setBox(elApproval, "-");
-      setBox(elTampered, "-");
-      setBox(elProdBridge, "-");
+      setBox(elBridge, "No initData present.", "invalid");
       return;
     }
 
     try {
-      // 1) Isolated POC validator (unchanged behavior)
-      var originalResult = await callEndpoint(VALIDATOR_URL, initData);
-      if (originalResult && originalResult.valid) {
-        setBox(elOriginal, "valid: true\ntelegram_user_id: " + originalResult.telegram_user_id, "valid");
-        if (originalResult.approved === true) {
-          setBox(elApproval, "approved: true\nThis identity IS the approved Mohamed test account.", "valid");
-        } else if (originalResult.approved === false) {
-          setBox(elApproval, "approved: false\nThis identity is genuine but NOT approved as Mohamed.", "warn");
-        } else {
-          setBox(elApproval, "approved field missing from response.", "invalid");
-        }
-      } else {
-        setBox(elOriginal, "valid: false\nreason: " + (originalResult && originalResult.reason ? originalResult.reason : "unknown"), "invalid");
-        setBox(elApproval, "-");
+      var res = await fetch(PROD_BRIDGE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: initData })
+      });
+      var data = await res.json();
+
+      // Build a display-safe summary. Tokens themselves are never put into
+      // the DOM, console, or any storage - only non-secret metadata.
+      var summary =
+        "authenticated: " + data.authenticated +
+        "\ntelegram_user_id: " + data.telegram_user_id +
+        "\napproved: " + data.approved +
+        "\nsession_created: " + data.session_created +
+        (data.reason ? ("\nreason: " + data.reason) : "");
+      setBox(elBridge, summary, data.session_created ? "valid" : "warn");
+
+      if (data.session_created && data.access_token && data.refresh_token) {
+        // Kept in memory only for this page's lifetime.
+        memorySession = {
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
+          expires_at: data.expires_at
+        };
+
+        // Call the EXISTING production RPC using ONLY the normal
+        // publishable-key REST endpoint + the returned access token as
+        // the caller's Authorization header - no elevated key involved.
+        var rpcRes = await fetch(SUPABASE_URL + "/rest/v1/rpc/editor_dashboard_clients", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_PUBLISHABLE_KEY,
+            "Authorization": "Bearer " + memorySession.access_token
+          },
+          body: JSON.stringify({})
+        });
+        var rpcText = await rpcRes.text();
+        setBox(elRpc, "status: " + rpcRes.status + "\nbody: " + rpcText, rpcRes.ok ? "valid" : "invalid");
       }
-
-      var tamperedInitData = buildTamperedCopy(initData);
-      var tamperedResult = tamperedInitData ? await callEndpoint(VALIDATOR_URL, tamperedInitData) : { valid: false, reason: "tamper_build_failed" };
-      setBox(elTampered, "valid: " + !!tamperedResult.valid + "\nreason: " + (tamperedResult.reason || "-"), tamperedResult.valid ? "invalid" : "valid");
-
-      // 2) PRODUCTION Stage 1 auth-bridge function (separate endpoint, same untouched initData)
-      var prodResult = await callEndpoint(PROD_BRIDGE_URL, initData);
-      if (prodResult && prodResult.authenticated) {
-        setBox(elProdBridge, "authenticated: true\ntelegram_user_id: " + prodResult.telegram_user_id + "\napproved: " + prodResult.approved + "\nsession_created: " + prodResult.session_created, "valid");
-      } else {
-        setBox(elProdBridge, "authenticated: false\nreason: " + (prodResult && prodResult.reason ? prodResult.reason : "unknown") + (prodResult && prodResult.telegram_user_id ? ("\ntelegram_user_id: " + prodResult.telegram_user_id) : ""), "warn");
-      }
-
-      var originalOk = !!(originalResult && originalResult.valid);
-      var tamperedRejectedCorrectly = !tamperedResult.valid && tamperedResult.reason === "signature_mismatch";
-      var overallPass = originalOk && tamperedRejectedCorrectly;
-
-      setBox(
-        elOverall,
-        (overallPass ? "PASS" : "FAIL") +
-          "\noriginal_valid: " + originalOk +
-          "\ntampered_reason: " + (tamperedResult.reason || "-"),
-        overallPass ? "valid" : "invalid"
-      );
     } catch (e) {
-      setBox(elOverall, "Request to validator failed.", "invalid");
+      setBox(elBridge, "Request failed.", "invalid");
     }
   });
 </script>
