@@ -11,59 +11,123 @@
   .note { font-size:13px; color:#999; margin-bottom:20px; }
   button { width:100%; padding:14px; font-size:16px; border:none; border-radius:10px; background:#2ea6ff; color:#fff; margin-top:8px; }
   button:active { opacity:0.8; }
-  #result { margin-top:20px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:14px; white-space:pre-wrap; word-break:break-word; }
+  .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
+  .label { font-size:12px; color:#888; margin-top:16px; margin-bottom:4px; }
 </style>
 </head>
 <body>
   <h2>Mini App POC</h2>
-  <p class="note">Isolated test page. Not connected to production. No secrets here.</p>
-  <button id="checkBtn">Validate with test backend</button>
-  <div id="result">No result yet.</div>
+  <p class="note">Isolated test page. Not connected to production. No secrets here. Raw initData is never shown, logged, or stored on this page.</p>
+  <button id="checkBtn">Validate + tamper test</button>
+
+  <div class="label">Original (untouched) initData</div>
+  <div id="resultOriginal" class="box">No result yet.</div>
+
+  <div class="label">Tampered copy (one char changed, in-memory only)</div>
+  <div id="resultTampered" class="box">No result yet.</div>
+
+  <div class="label">Overall</div>
+  <div id="resultOverall" class="box">No result yet.</div>
 
 <script>
   // Isolated POC test page only. Do not treat as production code.
   var VALIDATOR_URL = "https://weyzoascdrpktwceldwa.supabase.co/functions/v1/validate-init-data";
-  var resultEl = document.getElementById("result");
+  var elOriginal = document.getElementById("resultOriginal");
+  var elTampered = document.getElementById("resultTampered");
+  var elOverall = document.getElementById("resultOverall");
   var btn = document.getElementById("checkBtn");
 
-  function showResult(html, cls) {
-    resultEl.innerHTML = html;
-    resultEl.className = cls || "";
+  function setBox(el, text, cls) {
+    el.textContent = text;
+    el.className = "box " + (cls || "");
   }
 
-  btn.addEventListener("click", function () {
+  async function callValidator(initDataString) {
+    // initDataString is passed in-memory only. It is never logged,
+    // never stored, and never rendered to the page.
+    var res = await fetch(VALIDATOR_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: initDataString })
+    });
+    return res.json();
+  }
+
+  // Builds a tampered COPY by changing exactly one character in a single
+  // non-hash field (auth_date), while leaving the original hash untouched.
+  // The original initData string passed in is never modified.
+  function buildTamperedCopy(originalInitData) {
+    var params = new URLSearchParams(originalInitData);
+    if (!params.has("hash")) return null;
+
+    var candidateKeys = ["auth_date", "query_id"];
+    var targetKey = null;
+    for (var i = 0; i < candidateKeys.length; i++) {
+      var v = params.get(candidateKeys[i]);
+      if (v && v.length > 0) { targetKey = candidateKeys[i]; break; }
+    }
+    if (!targetKey) return null;
+
+    var original = params.get(targetKey);
+    var lastChar = original.charAt(original.length - 1);
+    var newChar = lastChar === "0" ? "1" : "0";
+    var tamperedValue = original.slice(0, -1) + newChar;
+
+    params.set(targetKey, tamperedValue); // hash param is left as-is on purpose
+    return params.toString();
+  }
+
+  btn.addEventListener("click", async function () {
+    setBox(elOriginal, "Running...");
+    setBox(elTampered, "Running...");
+    setBox(elOverall, "Running...");
+
     var tg = window.Telegram && window.Telegram.WebApp;
     if (!tg) {
-      showResult("Telegram.WebApp is not available.\nThis page is not open inside Telegram.", "invalid");
+      setBox(elOverall, "Telegram.WebApp is not available. Not opened inside Telegram.", "invalid");
+      setBox(elOriginal, "-");
+      setBox(elTampered, "-");
       return;
     }
     tg.ready();
     var initData = tg.initData || "";
     if (!initData) {
-      showResult("No initData present on window.Telegram.WebApp.", "invalid");
+      setBox(elOverall, "No initData present.", "invalid");
+      setBox(elOriginal, "-");
+      setBox(elTampered, "-");
       return;
     }
-    // initData is sent directly to the isolated test validator only.
-    // It is intentionally never stored in localStorage/sessionStorage
-    // and never printed to the console.
-    fetch(VALIDATOR_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: initData })
-    })
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        if (data && data.valid) {
-          showResult("valid: true\ntelegram_user_id: " + data.telegram_user_id, "valid");
-        } else {
-          showResult("valid: false\nreason: " + (data && data.reason ? data.reason : "unknown"), "invalid");
-        }
-      })
-      .catch(function () {
-        showResult("Request to validator failed.", "invalid");
-      });
+
+    try {
+      var originalResult = await callValidator(initData);
+      if (originalResult && originalResult.valid) {
+        setBox(elOriginal, "valid: true\ntelegram_user_id: " + originalResult.telegram_user_id, "valid");
+      } else {
+        setBox(elOriginal, "valid: false\nreason: " + (originalResult && originalResult.reason ? originalResult.reason : "unknown"), "invalid");
+      }
+
+      var tamperedInitData = buildTamperedCopy(initData);
+      var tamperedResult = tamperedInitData ? await callValidator(tamperedInitData) : { valid: false, reason: "tamper_build_failed" };
+      // tamperedInitData is a local variable only; it is discarded when this
+      // function returns and is never stored or logged anywhere.
+      setBox(elTampered, "valid: " + !!tamperedResult.valid + "\nreason: " + (tamperedResult.reason || "-"), tamperedResult.valid ? "invalid" : "valid");
+
+      var originalOk = !!(originalResult && originalResult.valid);
+      var tamperedRejectedCorrectly = !tamperedResult.valid && tamperedResult.reason === "signature_mismatch";
+      var overallPass = originalOk && tamperedRejectedCorrectly;
+
+      setBox(
+        elOverall,
+        (overallPass ? "PASS" : "FAIL") +
+          "\noriginal_valid: " + originalOk +
+          "\ntampered_reason: " + (tamperedResult.reason || "-"),
+        overallPass ? "valid" : "invalid"
+      );
+    } catch (e) {
+      setBox(elOverall, "Request to validator failed.", "invalid");
+    }
   });
 </script>
 </body>
