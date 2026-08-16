@@ -15,19 +15,21 @@
   #cleanupBtn { background:#e5734d; }
   #cleanupBtn:disabled { background:#3a3d44; color:#777; }
   #storageTestBtn { background:#8a6fd1; }
+  #fallbackWriteBtn { background:#3fa373; }
   .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
   .warn { color:#ffb74d; }
   .label { font-size:12px; color:#888; margin-top:16px; margin-bottom:4px; }
+  .big-result { font-size:20px; font-weight:bold; text-align:center; padding:20px; }
 </style>
 </head>
 <body>
   <h2>Full Session Lifecycle Test</h2>
   <p class="note">
-    Single Mini App runtime, in-memory only. No localStorage/sessionStorage/
-    IndexedDB/cookies are used for tokens. Access/refresh tokens are never
-    displayed, logged, or put in a URL.
+    Single Mini App runtime, in-memory only for the Auth test below. No
+    localStorage/sessionStorage/IndexedDB/cookies are used for real tokens.
+    Access/refresh tokens are never displayed, logged, or put in a URL.
     <br><br>
     If this page is closed or reloaded before you press "Clean up POC
     session", the in-memory session is lost and cannot be cleaned up from
@@ -43,16 +45,27 @@
   <div class="label">Cleanup result</div>
   <div id="cleanupBox" class="box">Not run yet.</div>
 
-  <h3>Telegram Storage Capability Test</h3>
+  <h3>Telegram SecureStorage Capability Test</h3>
   <p class="note">
-    Isolated capability/persistence harness. Only ever writes a dummy
-    non-sensitive test value - never a real token. Used to determine
-    whether Telegram.WebApp.SecureStorage is available and reliable on
-    this client before any production storage decision is made.
+    Already tested on this environment: SecureStorage is present but
+    setItem failed (UNSUPPORTED). No need to re-run - see the fallback
+    test below instead.
   </p>
   <button id="storageTestBtn">Test SecureStorage support</button>
   <div class="label">Storage capability result</div>
   <div id="storageResultBox" class="box">Not run yet.</div>
+
+  <h3>Persistent Storage Fallback Test (localStorage, dummy value only)</h3>
+  <p class="note">
+    Tests the realistic fallback mechanism for a Supabase custom storage
+    adapter. Only ever writes a dummy, non-sensitive test value - never a
+    real token. This section checks automatically every time the page
+    loads, so simply reload/reopen and look at the result below - no
+    button press needed after the first write.
+  </p>
+  <button id="fallbackWriteBtn">Write a new test value (start/restart test)</button>
+  <div class="label">Fallback persistence result</div>
+  <div id="fallbackResultBox" class="box big-result">Checking...</div>
 
 <script>
   // Isolated POC test page only. Do not treat as production code.
@@ -67,6 +80,8 @@
   var cleanupBox = document.getElementById("cleanupBox");
   var storageTestBtn = document.getElementById("storageTestBtn");
   var storageResultBox = document.getElementById("storageResultBox");
+  var fallbackWriteBtn = document.getElementById("fallbackWriteBtn");
+  var fallbackResultBox = document.getElementById("fallbackResultBox");
 
   var memorySession = null;
 
@@ -235,10 +250,7 @@
     }
   });
 
-  // ===== Telegram Storage Capability Harness =====
-  // Isolated, repeatable. Only ever touches a dummy, non-sensitive value.
-  // Does not run any real close/reopen/restart step - those are manual
-  // physical actions Ahmed performs later on the real Desktop client.
+  // ===== Telegram SecureStorage Capability Harness (already tested) =====
   storageTestBtn.addEventListener("click", function () {
     setBox(storageResultBox, "Running...");
     var tg = window.Telegram && window.Telegram.WebApp;
@@ -253,7 +265,7 @@
       return;
     }
     var testKey = "poc_storage_capability_test";
-    var testValue = "dummy_" + Date.now(); // never a real token
+    var testValue = "dummy_" + Date.now();
     try {
       tg.SecureStorage.setItem(testKey, testValue, function (err) {
         if (err) {
@@ -266,17 +278,57 @@
             return;
           }
           var matched = value === testValue;
-          setBox(
-            storageResultBox,
-            "SecureStorage available: true\nwrite/read roundtrip matched: " + matched + "\nTelegram WebApp version: " + version + "\n\nNote: this only confirms it works for THIS single call. Persistence across close/reopen must still be tested manually.",
-            matched ? "valid" : "warn"
-          );
+          setBox(storageResultBox, "SecureStorage available: true\nwrite/read roundtrip matched: " + matched + "\nversion: " + version, matched ? "valid" : "warn");
         });
       });
     } catch (e) {
       setBox(storageResultBox, "SecureStorage threw synchronously: " + e + "\nversion: " + version, "invalid");
     }
   });
+
+  // ===== Persistent Storage Fallback Test (localStorage, dummy value only) =====
+  // This section NEVER calls the network and NEVER touches any real
+  // credential. It only ever reads/writes one dummy key locally, so it is
+  // safe to run automatically on every page load (no auth call happens).
+  var FALLBACK_KEY = "poc_fallback_persistence_test";
+
+  function checkFallbackPersistence(justWrote) {
+    try {
+      var raw = localStorage.getItem(FALLBACK_KEY);
+      if (!raw) {
+        setBox(
+          fallbackResultBox,
+          justWrote ? "WRITE FAILED - value not found immediately after writing" : "No previous test value found.\nPress the button below to start the test.",
+          "warn"
+        );
+        return;
+      }
+      var parsed = JSON.parse(raw);
+      var ageSeconds = Math.round((Date.now() - parsed.writtenAt) / 1000);
+      setBox(
+        fallbackResultBox,
+        "PASS - value survived\nvalue: " + parsed.value + "\nwritten " + ageSeconds + "s ago",
+        "valid"
+      );
+    } catch (e) {
+      setBox(fallbackResultBox, "FAIL - could not read/parse stored value (" + e + ")", "invalid");
+    }
+  }
+
+  fallbackWriteBtn.addEventListener("click", function () {
+    var value = "dummy_" + Math.random().toString(36).slice(2, 10);
+    var record = { value: value, writtenAt: Date.now() };
+    try {
+      localStorage.setItem(FALLBACK_KEY, JSON.stringify(record));
+      checkFallbackPersistence(true);
+    } catch (e) {
+      setBox(fallbackResultBox, "FAIL - localStorage.setItem threw: " + e, "invalid");
+    }
+  });
+
+  // Passive, automatic, read-only check on every page load. No network
+  // call, no auth call - safe to run without a click.
+  checkFallbackPersistence(false);
 </script>
 </body>
 </html>
