@@ -3,14 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mini App POC - Stage 2 controlled session test</title>
+<title>Mini App POC - Full session lifecycle test</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   body { font-family: -apple-system, sans-serif; background:#111318; color:#e6e6e6; padding:24px; max-width:480px; margin:0 auto; }
   h2 { font-size:18px; margin-bottom:4px; }
-  .note { font-size:13px; color:#999; margin-bottom:20px; }
-  button { width:100%; padding:14px; font-size:16px; border:none; border-radius:10px; background:#2ea6ff; color:#fff; margin-top:8px; }
-  button:disabled { background:#444; color:#888; }
+  .note { font-size:12px; color:#999; margin-bottom:16px; line-height:1.5; }
+  button { width:100%; padding:14px; font-size:16px; border:none; border-radius:10px; background:#2ea6ff; color:#fff; margin-top:10px; }
+  button:disabled { background:#3a3d44; color:#777; }
+  #cleanupBtn { background:#e5734d; }
+  #cleanupBtn:disabled { background:#3a3d44; color:#777; }
   .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
@@ -19,100 +21,216 @@
 </style>
 </head>
 <body>
-  <h2>Stage 2 - Controlled Session Test</h2>
-  <p class="note">Single-use test. No tokens are stored in localStorage/sessionStorage, ever printed to console, or put in a URL. This button disables itself after one submission.</p>
-  <button id="testBtn">Run ONE session-creation test</button>
+  <h2>Full Session Lifecycle Test</h2>
+  <p class="note">
+    Single Mini App runtime, in-memory only. No localStorage/sessionStorage/
+    IndexedDB/cookies are used for tokens. Access/refresh tokens are never
+    displayed, logged, or put in a URL.
+    <br><br>
+    If this page is closed or reloaded before you press "Clean up POC
+    session", the in-memory session is lost and cannot be cleaned up from
+    here â it would then require direct database cleanup instead.
+  </p>
 
-  <div class="label">Bridge result (non-secret fields only)</div>
-  <div id="resultBridge" class="box">No result yet.</div>
+  <button id="authBtn">Run full lifecycle test</button>
+  <button id="cleanupBtn" disabled>Clean up POC session</button>
 
-  <div class="label">RPC test (editor_dashboard_clients via the new session)</div>
-  <div id="resultRpc" class="box">Not run yet.</div>
+  <div class="label">Result (non-secret fields only)</div>
+  <div id="resultBox" class="box">No result yet.</div>
+
+  <div class="label">Cleanup result</div>
+  <div id="cleanupBox" class="box">Not run yet.</div>
 
 <script>
   // Isolated POC test page only. Do not treat as production code.
   var PROD_BRIDGE_URL = "https://cifxmovqgxaafzrturrz.supabase.co/functions/v1/poc-telegram-auth-bridge";
   var SUPABASE_URL = "https://cifxmovqgxaafzrturrz.supabase.co";
-  // Publishable key is not secret - it is the normal browser-facing key,
-  // equivalent to the existing anon key already used by the real dashboard.
+  // Publishable key is not secret - the normal browser-facing key,
+  // equivalent to the anon key already used by the real dashboard.
   var SUPABASE_PUBLISHABLE_KEY = "sb_publishable_4tUk_rnpMfdKdb2WJFaPng_WEwOv07c";
+  var EXPECTED_UUID = "19727233-49d1-4d0f-97b1-8113a8192d44";
 
-  var elBridge = document.getElementById("resultBridge");
-  var elRpc = document.getElementById("resultRpc");
-  var btn = document.getElementById("testBtn");
+  var authBtn = document.getElementById("authBtn");
+  var cleanupBtn = document.getElementById("cleanupBtn");
+  var resultBox = document.getElementById("resultBox");
+  var cleanupBox = document.getElementById("cleanupBox");
+
+  // In-memory only. Never assigned to localStorage/sessionStorage/
+  // IndexedDB/cookies. Never logged. Lost on page close/reload.
+  var memorySession = null;
 
   function setBox(el, text, cls) {
     el.textContent = text;
     el.className = "box " + (cls || "");
   }
 
-  // In-memory only. Never assigned to localStorage/sessionStorage. Never
-  // logged. Discarded when the page is closed or reloaded.
-  var memorySession = null;
+  function showSummary(obj) {
+    var lines = [];
+    for (var k in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, k)) {
+        lines.push(k + ": " + obj[k]);
+      }
+    }
+    setBox(resultBox, lines.join("\n"));
+  }
 
-  btn.addEventListener("click", async function () {
-    if (btn.disabled) return;
-    btn.disabled = true; // prevent any accidental double-click / double-submit
-    btn.textContent = "Test already run (disabled)";
+  // Decodes ONLY the JWT payload locally to inspect claims. The token
+  // itself is never displayed, logged, or stored - only two derived,
+  // non-secret fields (sub match boolean, session_id value) are kept.
+  function decodeJwtPayload(token) {
+    try {
+      var parts = token.split(".");
+      if (parts.length !== 3) return null;
+      var b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      var padded = b64 + "===".slice((b64.length + 3) % 4);
+      var json = atob(padded);
+      return JSON.parse(json);
+    } catch (e) {
+      return null;
+    }
+  }
 
-    setBox(elBridge, "Running...");
-    setBox(elRpc, "Not run yet.");
+  async function callRpc(accessToken) {
+    return fetch(SUPABASE_URL + "/rest/v1/rpc/editor_dashboard_clients", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_PUBLISHABLE_KEY,
+        "Authorization": "Bearer " + accessToken
+      },
+      body: JSON.stringify({})
+    });
+  }
+
+  authBtn.addEventListener("click", async function () {
+    if (authBtn.disabled) return;
+    authBtn.disabled = true; // one-shot on the frontend side too
+    authBtn.textContent = "Test already run (disabled)";
+
+    setBox(resultBox, "Running...");
 
     var tg = window.Telegram && window.Telegram.WebApp;
     if (!tg) {
-      setBox(elBridge, "Not opened inside Telegram.", "invalid");
+      showSummary({ error: "not_opened_inside_telegram" });
       return;
     }
     tg.ready();
     var initData = tg.initData || "";
     if (!initData) {
-      setBox(elBridge, "No initData present.", "invalid");
+      showSummary({ error: "no_init_data" });
       return;
     }
 
     try {
-      var res = await fetch(PROD_BRIDGE_URL, {
+      var bridgeRes = await fetch(PROD_BRIDGE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ initData: initData })
       });
-      var data = await res.json();
+      var bridgeData = await bridgeRes.json();
 
-      // Build a display-safe summary. Tokens themselves are never put into
-      // the DOM, console, or any storage - only non-secret metadata.
-      var summary =
-        "authenticated: " + data.authenticated +
-        "\ntelegram_user_id: " + data.telegram_user_id +
-        "\napproved: " + data.approved +
-        "\nsession_created: " + data.session_created +
-        (data.reason ? ("\nreason: " + data.reason) : "");
-      setBox(elBridge, summary, data.session_created ? "valid" : "warn");
-
-      if (data.session_created && data.access_token && data.refresh_token) {
-        // Kept in memory only for this page's lifetime.
-        memorySession = {
-          access_token: data.access_token,
-          refresh_token: data.refresh_token,
-          expires_at: data.expires_at
-        };
-
-        // Call the EXISTING production RPC using ONLY the normal
-        // publishable-key REST endpoint + the returned access token as
-        // the caller's Authorization header - no elevated key involved.
-        var rpcRes = await fetch(SUPABASE_URL + "/rest/v1/rpc/editor_dashboard_clients", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "apikey": SUPABASE_PUBLISHABLE_KEY,
-            "Authorization": "Bearer " + memorySession.access_token
-          },
-          body: JSON.stringify({})
+      if (!bridgeData.session_created || !bridgeData.access_token || !bridgeData.refresh_token) {
+        showSummary({
+          session_created: false,
+          reason: bridgeData.reason || "unknown"
         });
-        var rpcText = await rpcRes.text();
-        setBox(elRpc, "status: " + rpcRes.status + "\nbody: " + rpcText, rpcRes.ok ? "valid" : "invalid");
+        return;
+      }
+
+      // Kept in memory only, for this page's lifetime.
+      memorySession = {
+        access_token: bridgeData.access_token,
+        refresh_token: bridgeData.refresh_token
+      };
+
+      // 3) Verify authenticated user via the normal publishable-key client.
+      var userRes = await fetch(SUPABASE_URL + "/auth/v1/user", {
+        headers: {
+          "apikey": SUPABASE_PUBLISHABLE_KEY,
+          "Authorization": "Bearer " + memorySession.access_token
+        }
+      });
+      var userData = await userRes.json();
+      var userUuidMatch = !!(userData && userData.id === EXPECTED_UUID);
+
+      // 4) Inspect JWT claims locally - token itself never displayed.
+      var claims = decodeJwtPayload(memorySession.access_token);
+      var jwtSubMatch = !!(claims && claims.sub === EXPECTED_UUID);
+      var sessionId = claims ? (claims.session_id || claims.sid || null) : null;
+
+      // 5) RPC before refresh - normal publishable key + user access token only.
+      var rpcBeforeRes = await callRpc(memorySession.access_token);
+      var rpcBeforeStatus = rpcBeforeRes.status;
+
+      // 6) EXACTLY ONE refresh-token exchange.
+      var refreshRes = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        headers: {
+          "apikey": SUPABASE_PUBLISHABLE_KEY,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ refresh_token: memorySession.refresh_token })
+      });
+      var refreshData = await refreshRes.json();
+      var refreshSuccess = !!(refreshRes.ok && refreshData.access_token && refreshData.refresh_token);
+
+      var sameSessionIdAfterRefresh = null;
+      var userUuidMatchAfterRefresh = null;
+      var rpcAfterStatus = null;
+
+      if (refreshSuccess) {
+        // Still in-memory only; still the same logical session.
+        memorySession.access_token = refreshData.access_token;
+        memorySession.refresh_token = refreshData.refresh_token;
+
+        var claimsAfter = decodeJwtPayload(memorySession.access_token);
+        var sessionIdAfter = claimsAfter ? (claimsAfter.session_id || claimsAfter.sid || null) : null;
+        sameSessionIdAfterRefresh = sessionIdAfter === sessionId;
+        userUuidMatchAfterRefresh = !!(claimsAfter && claimsAfter.sub === EXPECTED_UUID);
+
+        var rpcAfterRes = await callRpc(memorySession.access_token);
+        rpcAfterStatus = rpcAfterRes.status;
+      }
+
+      showSummary({
+        session_created: true,
+        user_uuid_match: userUuidMatch,
+        jwt_sub_match: jwtSubMatch,
+        session_id: sessionId,
+        rpc_before_refresh_status: rpcBeforeStatus,
+        refresh_success: refreshSuccess,
+        user_uuid_match_after_refresh: userUuidMatchAfterRefresh,
+        same_session_id_after_refresh: sameSessionIdAfterRefresh,
+        rpc_after_refresh_status: rpcAfterStatus
+      });
+
+      if (refreshSuccess) {
+        cleanupBtn.disabled = false;
       }
     } catch (e) {
-      setBox(elBridge, "Request failed.", "invalid");
+      showSummary({ error: "request_failed" });
+    }
+  });
+
+  cleanupBtn.addEventListener("click", async function () {
+    if (cleanupBtn.disabled || !memorySession) return;
+    cleanupBtn.disabled = true;
+    cleanupBtn.textContent = "Cleanup already run (disabled)";
+    setBox(cleanupBox, "Running...");
+
+    try {
+      // LOCAL scope only - revokes just this one session, never global.
+      var res = await fetch(SUPABASE_URL + "/auth/v1/logout?scope=local", {
+        method: "POST",
+        headers: {
+          "apikey": SUPABASE_PUBLISHABLE_KEY,
+          "Authorization": "Bearer " + memorySession.access_token
+        }
+      });
+      setBox(cleanupBox, "cleanup_status: " + res.status, res.ok ? "valid" : "invalid");
+      memorySession = null;
+    } catch (e) {
+      setBox(cleanupBox, "cleanup_failed", "invalid");
     }
   });
 </script>
