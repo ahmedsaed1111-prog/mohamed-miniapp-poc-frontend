@@ -20,17 +20,20 @@
 </head>
 <body>
   <h2>Mini App POC</h2>
-  <p class="note">Isolated test page. Not connected to production. No secrets here. Raw initData is never shown, logged, or stored on this page.</p>
-  <button id="checkBtn">Validate + tamper + approval test</button>
+  <p class="note">Isolated test page. No secrets here. Raw initData is never shown, logged, or stored on this page.</p>
+  <button id="checkBtn">Run all tests (isolated + production)</button>
 
-  <div class="label">Original (untouched) initData</div>
+  <div class="label">Isolated POC validator - Original</div>
   <div id="resultOriginal" class="box">No result yet.</div>
 
-  <div class="label">Approval check (Mohamed identity)</div>
+  <div class="label">Isolated POC validator - Approval check</div>
   <div id="resultApproval" class="box">No result yet.</div>
 
-  <div class="label">Tampered copy (one char changed, in-memory only)</div>
+  <div class="label">Isolated POC validator - Tampered copy</div>
   <div id="resultTampered" class="box">No result yet.</div>
+
+  <div class="label">PRODUCTION poc-telegram-auth-bridge - result</div>
+  <div id="resultProdBridge" class="box">No result yet.</div>
 
   <div class="label">Overall (authenticity + tamper rejection only)</div>
   <div id="resultOverall" class="box">No result yet.</div>
@@ -38,9 +41,12 @@
 <script>
   // Isolated POC test page only. Do not treat as production code.
   var VALIDATOR_URL = "https://weyzoascdrpktwceldwa.supabase.co/functions/v1/validate-init-data";
+  var PROD_BRIDGE_URL = "https://cifxmovqgxaafzrturrz.supabase.co/functions/v1/poc-telegram-auth-bridge";
+
   var elOriginal = document.getElementById("resultOriginal");
   var elApproval = document.getElementById("resultApproval");
   var elTampered = document.getElementById("resultTampered");
+  var elProdBridge = document.getElementById("resultProdBridge");
   var elOverall = document.getElementById("resultOverall");
   var btn = document.getElementById("checkBtn");
 
@@ -49,10 +55,10 @@
     el.className = "box " + (cls || "");
   }
 
-  async function callValidator(initDataString) {
+  async function callEndpoint(url, initDataString) {
     // initDataString is passed in-memory only. It is never logged,
     // never stored, and never rendered to the page.
-    var res = await fetch(VALIDATOR_URL, {
+    var res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData: initDataString })
@@ -88,6 +94,7 @@
     setBox(elOriginal, "Running...");
     setBox(elApproval, "Running...");
     setBox(elTampered, "Running...");
+    setBox(elProdBridge, "Running...");
     setBox(elOverall, "Running...");
 
     var tg = window.Telegram && window.Telegram.WebApp;
@@ -96,6 +103,7 @@
       setBox(elOriginal, "-");
       setBox(elApproval, "-");
       setBox(elTampered, "-");
+      setBox(elProdBridge, "-");
       return;
     }
     tg.ready();
@@ -105,11 +113,13 @@
       setBox(elOriginal, "-");
       setBox(elApproval, "-");
       setBox(elTampered, "-");
+      setBox(elProdBridge, "-");
       return;
     }
 
     try {
-      var originalResult = await callValidator(initData);
+      // 1) Isolated POC validator (unchanged behavior)
+      var originalResult = await callEndpoint(VALIDATOR_URL, initData);
       if (originalResult && originalResult.valid) {
         setBox(elOriginal, "valid: true\ntelegram_user_id: " + originalResult.telegram_user_id, "valid");
         if (originalResult.approved === true) {
@@ -125,10 +135,16 @@
       }
 
       var tamperedInitData = buildTamperedCopy(initData);
-      var tamperedResult = tamperedInitData ? await callValidator(tamperedInitData) : { valid: false, reason: "tamper_build_failed" };
-      // tamperedInitData is a local variable only; it is discarded when this
-      // function returns and is never stored or logged anywhere.
+      var tamperedResult = tamperedInitData ? await callEndpoint(VALIDATOR_URL, tamperedInitData) : { valid: false, reason: "tamper_build_failed" };
       setBox(elTampered, "valid: " + !!tamperedResult.valid + "\nreason: " + (tamperedResult.reason || "-"), tamperedResult.valid ? "invalid" : "valid");
+
+      // 2) PRODUCTION Stage 1 auth-bridge function (separate endpoint, same untouched initData)
+      var prodResult = await callEndpoint(PROD_BRIDGE_URL, initData);
+      if (prodResult && prodResult.authenticated) {
+        setBox(elProdBridge, "authenticated: true\ntelegram_user_id: " + prodResult.telegram_user_id + "\napproved: " + prodResult.approved + "\nsession_created: " + prodResult.session_created, "valid");
+      } else {
+        setBox(elProdBridge, "authenticated: false\nreason: " + (prodResult && prodResult.reason ? prodResult.reason : "unknown") + (prodResult && prodResult.telegram_user_id ? ("\ntelegram_user_id: " + prodResult.telegram_user_id) : ""), "warn");
+      }
 
       var originalOk = !!(originalResult && originalResult.valid);
       var tamperedRejectedCorrectly = !tamperedResult.valid && tamperedResult.reason === "signature_mismatch";
