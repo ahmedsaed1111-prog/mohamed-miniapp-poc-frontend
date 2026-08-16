@@ -14,27 +14,32 @@
   .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
+  .warn { color:#ffb74d; }
   .label { font-size:12px; color:#888; margin-top:16px; margin-bottom:4px; }
 </style>
 </head>
 <body>
   <h2>Mini App POC</h2>
   <p class="note">Isolated test page. Not connected to production. No secrets here. Raw initData is never shown, logged, or stored on this page.</p>
-  <button id="checkBtn">Validate + tamper test</button>
+  <button id="checkBtn">Validate + tamper + approval test</button>
 
   <div class="label">Original (untouched) initData</div>
   <div id="resultOriginal" class="box">No result yet.</div>
 
+  <div class="label">Approval check (Mohamed identity)</div>
+  <div id="resultApproval" class="box">No result yet.</div>
+
   <div class="label">Tampered copy (one char changed, in-memory only)</div>
   <div id="resultTampered" class="box">No result yet.</div>
 
-  <div class="label">Overall</div>
+  <div class="label">Overall (authenticity + tamper rejection only)</div>
   <div id="resultOverall" class="box">No result yet.</div>
 
 <script>
   // Isolated POC test page only. Do not treat as production code.
   var VALIDATOR_URL = "https://weyzoascdrpktwceldwa.supabase.co/functions/v1/validate-init-data";
   var elOriginal = document.getElementById("resultOriginal");
+  var elApproval = document.getElementById("resultApproval");
   var elTampered = document.getElementById("resultTampered");
   var elOverall = document.getElementById("resultOverall");
   var btn = document.getElementById("checkBtn");
@@ -81,6 +86,7 @@
 
   btn.addEventListener("click", async function () {
     setBox(elOriginal, "Running...");
+    setBox(elApproval, "Running...");
     setBox(elTampered, "Running...");
     setBox(elOverall, "Running...");
 
@@ -88,6 +94,7 @@
     if (!tg) {
       setBox(elOverall, "Telegram.WebApp is not available. Not opened inside Telegram.", "invalid");
       setBox(elOriginal, "-");
+      setBox(elApproval, "-");
       setBox(elTampered, "-");
       return;
     }
@@ -96,6 +103,7 @@
     if (!initData) {
       setBox(elOverall, "No initData present.", "invalid");
       setBox(elOriginal, "-");
+      setBox(elApproval, "-");
       setBox(elTampered, "-");
       return;
     }
@@ -104,8 +112,16 @@
       var originalResult = await callValidator(initData);
       if (originalResult && originalResult.valid) {
         setBox(elOriginal, "valid: true\ntelegram_user_id: " + originalResult.telegram_user_id, "valid");
+        if (originalResult.approved === true) {
+          setBox(elApproval, "approved: true\nThis identity IS the approved Mohamed test account.", "valid");
+        } else if (originalResult.approved === false) {
+          setBox(elApproval, "approved: false\nThis identity is genuine but NOT approved as Mohamed.", "warn");
+        } else {
+          setBox(elApproval, "approved field missing from response.", "invalid");
+        }
       } else {
         setBox(elOriginal, "valid: false\nreason: " + (originalResult && originalResult.reason ? originalResult.reason : "unknown"), "invalid");
+        setBox(elApproval, "-");
       }
 
       var tamperedInitData = buildTamperedCopy(initData);
