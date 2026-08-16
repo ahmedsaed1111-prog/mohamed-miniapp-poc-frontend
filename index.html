@@ -8,11 +8,13 @@
 <style>
   body { font-family: -apple-system, sans-serif; background:#111318; color:#e6e6e6; padding:24px; max-width:480px; margin:0 auto; }
   h2 { font-size:18px; margin-bottom:4px; }
+  h3 { font-size:15px; margin-top:32px; margin-bottom:4px; border-top:1px solid #2a2d33; padding-top:24px; }
   .note { font-size:12px; color:#999; margin-bottom:16px; line-height:1.5; }
   button { width:100%; padding:14px; font-size:16px; border:none; border-radius:10px; background:#2ea6ff; color:#fff; margin-top:10px; }
   button:disabled { background:#3a3d44; color:#777; }
   #cleanupBtn { background:#e5734d; }
   #cleanupBtn:disabled { background:#3a3d44; color:#777; }
+  #storageTestBtn { background:#8a6fd1; }
   .box { margin-top:16px; padding:16px; border-radius:10px; background:#1c1f26; font-family: ui-monospace, monospace; font-size:13px; white-space:pre-wrap; word-break:break-word; }
   .valid { color:#4caf50; }
   .invalid { color:#e57373; }
@@ -29,7 +31,7 @@
     <br><br>
     If this page is closed or reloaded before you press "Clean up POC
     session", the in-memory session is lost and cannot be cleaned up from
-    here â it would then require direct database cleanup instead.
+    here - it would then require direct database cleanup instead.
   </p>
 
   <button id="authBtn">Run full lifecycle test</button>
@@ -41,12 +43,21 @@
   <div class="label">Cleanup result</div>
   <div id="cleanupBox" class="box">Not run yet.</div>
 
+  <h3>Telegram Storage Capability Test</h3>
+  <p class="note">
+    Isolated capability/persistence harness. Only ever writes a dummy
+    non-sensitive test value - never a real token. Used to determine
+    whether Telegram.WebApp.SecureStorage is available and reliable on
+    this client before any production storage decision is made.
+  </p>
+  <button id="storageTestBtn">Test SecureStorage support</button>
+  <div class="label">Storage capability result</div>
+  <div id="storageResultBox" class="box">Not run yet.</div>
+
 <script>
   // Isolated POC test page only. Do not treat as production code.
   var PROD_BRIDGE_URL = "https://cifxmovqgxaafzrturrz.supabase.co/functions/v1/poc-telegram-auth-bridge";
   var SUPABASE_URL = "https://cifxmovqgxaafzrturrz.supabase.co";
-  // Publishable key is not secret - the normal browser-facing key,
-  // equivalent to the anon key already used by the real dashboard.
   var SUPABASE_PUBLISHABLE_KEY = "sb_publishable_4tUk_rnpMfdKdb2WJFaPng_WEwOv07c";
   var EXPECTED_UUID = "19727233-49d1-4d0f-97b1-8113a8192d44";
 
@@ -54,9 +65,9 @@
   var cleanupBtn = document.getElementById("cleanupBtn");
   var resultBox = document.getElementById("resultBox");
   var cleanupBox = document.getElementById("cleanupBox");
+  var storageTestBtn = document.getElementById("storageTestBtn");
+  var storageResultBox = document.getElementById("storageResultBox");
 
-  // In-memory only. Never assigned to localStorage/sessionStorage/
-  // IndexedDB/cookies. Never logged. Lost on page close/reload.
   var memorySession = null;
 
   function setBox(el, text, cls) {
@@ -74,9 +85,6 @@
     setBox(resultBox, lines.join("\n"));
   }
 
-  // Decodes ONLY the JWT payload locally to inspect claims. The token
-  // itself is never displayed, logged, or stored - only two derived,
-  // non-secret fields (sub match boolean, session_id value) are kept.
   function decodeJwtPayload(token) {
     try {
       var parts = token.split(".");
@@ -104,7 +112,7 @@
 
   authBtn.addEventListener("click", async function () {
     if (authBtn.disabled) return;
-    authBtn.disabled = true; // one-shot on the frontend side too
+    authBtn.disabled = true;
     authBtn.textContent = "Test already run (disabled)";
 
     setBox(resultBox, "Running...");
@@ -137,13 +145,11 @@
         return;
       }
 
-      // Kept in memory only, for this page's lifetime.
       memorySession = {
         access_token: bridgeData.access_token,
         refresh_token: bridgeData.refresh_token
       };
 
-      // 3) Verify authenticated user via the normal publishable-key client.
       var userRes = await fetch(SUPABASE_URL + "/auth/v1/user", {
         headers: {
           "apikey": SUPABASE_PUBLISHABLE_KEY,
@@ -153,16 +159,13 @@
       var userData = await userRes.json();
       var userUuidMatch = !!(userData && userData.id === EXPECTED_UUID);
 
-      // 4) Inspect JWT claims locally - token itself never displayed.
       var claims = decodeJwtPayload(memorySession.access_token);
       var jwtSubMatch = !!(claims && claims.sub === EXPECTED_UUID);
       var sessionId = claims ? (claims.session_id || claims.sid || null) : null;
 
-      // 5) RPC before refresh - normal publishable key + user access token only.
       var rpcBeforeRes = await callRpc(memorySession.access_token);
       var rpcBeforeStatus = rpcBeforeRes.status;
 
-      // 6) EXACTLY ONE refresh-token exchange.
       var refreshRes = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token", {
         method: "POST",
         headers: {
@@ -179,7 +182,6 @@
       var rpcAfterStatus = null;
 
       if (refreshSuccess) {
-        // Still in-memory only; still the same logical session.
         memorySession.access_token = refreshData.access_token;
         memorySession.refresh_token = refreshData.refresh_token;
 
@@ -219,7 +221,6 @@
     setBox(cleanupBox, "Running...");
 
     try {
-      // LOCAL scope only - revokes just this one session, never global.
       var res = await fetch(SUPABASE_URL + "/auth/v1/logout?scope=local", {
         method: "POST",
         headers: {
@@ -231,6 +232,49 @@
       memorySession = null;
     } catch (e) {
       setBox(cleanupBox, "cleanup_failed", "invalid");
+    }
+  });
+
+  // ===== Telegram Storage Capability Harness =====
+  // Isolated, repeatable. Only ever touches a dummy, non-sensitive value.
+  // Does not run any real close/reopen/restart step - those are manual
+  // physical actions Ahmed performs later on the real Desktop client.
+  storageTestBtn.addEventListener("click", function () {
+    setBox(storageResultBox, "Running...");
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (!tg) {
+      setBox(storageResultBox, "not_opened_inside_telegram", "invalid");
+      return;
+    }
+    var version = tg.version || "unknown";
+    var hasSecureStorage = !!(tg.SecureStorage);
+    if (!hasSecureStorage) {
+      setBox(storageResultBox, "SecureStorage: not available on this client\nTelegram WebApp version: " + version, "warn");
+      return;
+    }
+    var testKey = "poc_storage_capability_test";
+    var testValue = "dummy_" + Date.now(); // never a real token
+    try {
+      tg.SecureStorage.setItem(testKey, testValue, function (err) {
+        if (err) {
+          setBox(storageResultBox, "SecureStorage present, setItem failed: " + err + "\nversion: " + version, "invalid");
+          return;
+        }
+        tg.SecureStorage.getItem(testKey, function (err2, value) {
+          if (err2) {
+            setBox(storageResultBox, "SecureStorage present, getItem failed: " + err2 + "\nversion: " + version, "invalid");
+            return;
+          }
+          var matched = value === testValue;
+          setBox(
+            storageResultBox,
+            "SecureStorage available: true\nwrite/read roundtrip matched: " + matched + "\nTelegram WebApp version: " + version + "\n\nNote: this only confirms it works for THIS single call. Persistence across close/reopen must still be tested manually.",
+            matched ? "valid" : "warn"
+          );
+        });
+      });
+    } catch (e) {
+      setBox(storageResultBox, "SecureStorage threw synchronously: " + e + "\nversion: " + version, "invalid");
     }
   });
 </script>
